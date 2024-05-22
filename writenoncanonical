@@ -3,78 +3,219 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <stdio.h>
-
 #define BAUDRATE B38400
-#define MODEMDEVICE "/dev/ttyS1"
-#define _POSIX_SOURCE 1 /* POSIX compliant source */
+#define _POSIX_SOURCE 1
 #define FALSE 0
 #define TRUE 1
+// Estados da máquina de estados
 
-volatile int STOP=FALSE;
+typedef enum {
+START,
+FLAG_RCV,
+A_RCV,
+C_RCV,
+BCC_OK,
+} State;
 
+volatile int STOP = FALSE;
 unsigned char FLAG = 0x5c;
-unsigned char A_SENDER= 0x03;
+unsigned char A_SENDER = 0x03;
 unsigned char A_RECEIVER = 0x01;
-unsigned char C_SET = 0x08;
+unsigned char C_SET = 0x07;
 unsigned char C_UA = 0x06;
+unsigned char BCC1 = 0x00;
+
+int main(int argc, char** argv) {
+int fd, c, res;
+struct termios oldtio, newtio;
+unsigned char buf[5];
+State currentState = START;
+
+if ((argc < 2) ||((strcmp("/dev/ttyS0", argv[1]) != 0) && (strcmp("/dev/ttyS1", argv[1]) != 0))) {
+
+printf("Usage:\tnserial SerialPort\n\tex: nserial /dev/ttyS1\n");
+
+exit(1);
+
+}
 
 
-int main(int argc, char** argv)
-{
-    int fd,c, res;
-    struct termios oldtio,newtio;
-    unsigned char buf[5];
-    int i, sum = 0, speed = 0;
+fd = open(argv[1], O_RDWR | O_NOCTTY);
+if (fd < 0) { perror(argv[1]); exit(-1); }
 
-    if ( (argc < 2) ||
-         ((strcmp("/dev/ttyS0", argv[1])!=0) &&
-          (strcmp("/dev/ttyS1", argv[1])!=0) )) {
-        printf("Usage:\tnserial SerialPort\n\tex: nserial /dev/ttyS1\n");
-        exit(1);
-    }
+if (tcgetattr(fd, &oldtio) == -1) {
+perror("tcgetattr");
+exit(-1);
+}
 
-    fd = open(argv[1], O_RDWR | O_NOCTTY );
-    if (fd < 0) { perror(argv[1]); exit(-1); }
+bzero(&newtio, sizeof(newtio));
+newtio.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
+newtio.c_iflag = IGNPAR;
+newtio.c_oflag = 0;
+newtio.c_lflag = 0;
+newtio.c_cc[VTIME] = 0;
+newtio.c_cc[VMIN] = 1;
+tcflush(fd, TCIOFLUSH);
 
-    if ( tcgetattr(fd,&oldtio) == -1) { 
-        perror("tcgetattr");
-        exit(-1);
-    }
+if (tcsetattr(fd, TCSANOW, &newtio) == -1) {
+perror("tcsetattr");
 
-    bzero(&newtio, sizeof(newtio));
-    newtio.c_cflag = BAUDRATE | CS8 | CLOCAL | CREAD;
-    newtio.c_iflag = IGNPAR;
-    newtio.c_oflag = 0;
+exit(-1);
 
-    newtio.c_lflag = 0;
+}
 
-    newtio.c_cc[VTIME]    = 0;   
-    newtio.c_cc[VMIN]     = 5;   
 
-    tcflush(fd, TCIOFLUSH);
+printf("New termios structure set\n");
 
-    if (tcsetattr(fd,TCSANOW,&newtio) == -1) {
-        perror("tcsetattr");
-        exit(-1);
-    }
+buf[0] = FLAG;
 
-    printf("New termios structure set\n");
-     
-    buf[0] = FLAG;
-    buf[1] = A_SENDER;
-    buf[2] = C_SET;
-    buf[3] = buf[1] ^ buf[2]; 
-    buf[4] = FLAG;
-    
-    res = write(fd,buf,5);
-    printf("%d bytes written\n", res);
-    
-    sleep(1);
-    if ( tcsetattr(fd,TCSANOW,&oldtio) == -1) {
-        perror("tcsetattr");
-        exit(-1);
-    }
+buf[1] = A_SENDER;
 
-    close(fd);
-    return 0;
+buf[2] = C_SET;
+
+buf[3] = buf[1] ^ buf[2]; // BCC
+
+buf[4] = FLAG;
+
+res = write(fd,buf,5);//Send message
+
+
+while (STOP == FALSE) {
+
+res = read(fd, buf, 1); // Leitura do byte
+
+printf("0x%02x\n",buf[0]);
+
+if (res != 1) {
+
+printf("Erro na transmissão do frame\n");
+
+currentState = START; // Volta ao estado inicial em caso de erro
+
+continue;
+
+}
+
+
+switch (currentState) {
+
+case START:
+
+if (buf[0] == FLAG)
+
+currentState = FLAG_RCV;
+
+printf("Start to FLAG_RC\n");
+
+break;
+
+
+case FLAG_RCV:
+
+if (buf[0] == FLAG){
+
+currentState = FLAG_RCV;
+
+break;}
+
+else if (buf[0] == A_RECEIVER){
+
+currentState = A_RCV;
+
+printf("FLAG_RCV to A_RCV\n");
+
+break;}
+
+else
+
+currentState = START;
+
+break;
+
+
+case A_RCV:
+
+if (buf[0] == C_UA){
+
+currentState = C_RCV;
+
+printf("A_RCV to C_RCV\n");
+
+break;} 
+
+else if (buf[0] == FLAG){
+
+currentState = FLAG_RCV;
+
+printf("A_RCV to FLAG_RCV\n");
+
+break;}
+
+else
+
+currentState = START;
+
+break;
+
+
+case C_RCV:
+
+if (buf[0] == (A_RECEIVER ^ C_UA)){
+
+currentState = BCC_OK;
+
+printf("C_RCV to BCC_OK\n");
+
+break;} 
+
+else if (buf[0] == FLAG){
+
+currentState = FLAG_RCV;
+
+printf("C_RCV para FLAG_RCV\n");
+
+break;}
+
+else
+
+currentState = START;
+
+break;
+
+
+case BCC_OK:
+
+if (buf[0] == FLAG){
+
+STOP = TRUE;
+
+printf("BCC_OK to STOP\n");
+
+break;}
+
+else
+
+currentState = START;
+
+break;
+
+
+}
+
+}
+
+printf("Valid UA frame\n"); 
+
+
+
+
+
+sleep(1);
+
+tcsetattr(fd, TCSANOW, &oldtio);
+
+close(fd);
+
+return 0;
+
 }
